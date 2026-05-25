@@ -9,7 +9,7 @@ from datetime import datetime
 from collections import deque
 from dataclasses import dataclass, field
 from typing import Optional, Annotated
-
+import sys
 from rich.console import Console
 from rich.prompt import Prompt, Confirm
 from rich.panel import Panel
@@ -27,6 +27,9 @@ from langchain_google_genai import ChatGoogleGenerativeAI
 from langchain_anthropic import ChatAnthropic
 from langchain_ollama import ChatOllama
 from langgraph.prebuilt import create_react_agent
+
+script_dir = os.path.dirname(os.path.abspath(__file__))
+sys.path.append(script_dir)
 
 try:
     import locvecwrapper as lvw
