@@ -28,9 +28,8 @@ from langchain_anthropic import ChatAnthropic
 from langchain_ollama import ChatOllama
 from langgraph.prebuilt import create_react_agent
 
-script_dir = os.path.dirname(os.path.abspath(__file__))
-sys.path.append(script_dir)
-os.chdir(current_dir)
+
+
 try:
     import locvecwrapper as lvw
     _LVW_AVAILABLE = True
