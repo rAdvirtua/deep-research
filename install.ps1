@@ -1,14 +1,10 @@
-$installDir = "$HOME\.deepresearch"
-Write-Host "Setting up DeepResearch Pipeline in $installDir" -ForegroundColor Cyan
-
-New-Item -ItemType Directory -Force -Path $installDir
-cd $installDir
-python -m venv venv
-
-.\venv\Scripts\pip install agno rich requests psutil langchain-groq langchain-google-genai langchain-anthropic langchain-ollama langgraph
+$projectDir = Get-Location
+$venvDir = "$HOME\.deepresearch\venv"
+$scriptPath = "$projectDir\orchestrator.py"
 
 $shortcutPath = "$HOME\AppData\Local\Microsoft\WindowsApps\deep-research.bat"
-$scriptPath = "$installDir\orchestrator.py"
-"@echo off`n`"$installDir\venv\Scripts\python.exe`" `"$scriptPath`" %*" | Out-File $shortcutPath -Encoding ascii
 
-Write-Host "--- Setup complete! Just run 'deep-research' in PowerShell. ---" -ForegroundColor Green
+"@echo off`n`"$venvDir\Scripts\python.exe`" `"$scriptPath`" %*" | Out-File $shortcutPath -Encoding ascii
+
+Write-Host "--- Setup complete! ---" -ForegroundColor Green
+Write-Host "The command 'deep-research' now points to: $scriptPath" -ForegroundColor Cyan   
