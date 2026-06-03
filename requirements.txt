@@ -7,3 +7,4 @@ locvec
 pymupdf
 sentence-transformers
 faiss-cpu
+ollama
