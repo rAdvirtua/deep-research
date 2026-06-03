@@ -206,30 +206,7 @@ def list_files(path: str = ".") -> str:
     ))
     return result
 
-def web_search(query: str) -> str:
-    """Search the web for information. Returns a summary of results."""
-    if not check_permission("web"):
-        return "PERMISSION_DENIED: web is disabled."
-    console.print(Panel(
-        Text(query, style=THEME["tool"]),
-        title=f"[{THEME['tool']}]⚙  WEB SEARCH[/]",
-        border_style="#d7af5f", padding=(0, 1)
-    ))
-    try:
-        from duckduckgo_search import DDGS
-        results = DDGS().text(query, max_results=3)
-        result = str(results)[:2000]
-        result = result + ("…(truncated)" if len(str(results)) > 2000 else "")
-        console.print(Panel(
-            Text(result[:400] + ("…" if len(result) > 400 else ""), style=THEME["tool_res"]),
-            title=f"[{THEME['tool_res']}]✔  SEARCH RESULTS[/]",
-            border_style="#87d7af", padding=(0, 1)
-        ))
-        return result
-    except Exception as e:
-        return f"Search failed: {e}"
-
-TOOLS = [shell, read_file, write_file, list_files, web_search]
+TOOLS = [shell, read_file, write_file, list_files]
 
 @dataclass
 class ContextMemory:
@@ -414,12 +391,17 @@ def decompose_task(llm, task: str) -> list[str]:
         pass
     return [task]
 
-def build_agent(llm, mem: ContextMemory) -> Agent:
+def build_agent(llm: Model, mem: ContextMemory) -> Agent:
+    from agno.tools.duckduckgo import DuckDuckGoTools
+    
     return Agent(
         model=llm,
-        tools=TOOLS,
-        description=mem.build_system_prompt(),
-        markdown=True
+        description="Autonomous elite software engineering and intelligence agent.",
+        instructions=_get_system_instructions(),
+        tools=TOOLS + [DuckDuckGoTools()],
+        show_tool_calls=True,
+        markdown=True,
+        add_history_to_messages=True
     )
 
 def run_step(agent: Agent, mem: ContextMemory, step: str, step_num: int, total: int) -> str:
