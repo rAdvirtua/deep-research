@@ -20,13 +20,11 @@ from rich.live import Live
 from rich import box
 from rich.syntax import Syntax
 
-from langchain_core.messages import HumanMessage, AIMessage, SystemMessage, ToolMessage
-from langchain_core.tools import tool
-from langchain_groq import ChatGroq
-from langchain_google_genai import ChatGoogleGenerativeAI
-from langchain_anthropic import ChatAnthropic
-from langchain_ollama import ChatOllama
-from langgraph.prebuilt import create_react_agent
+from agno.agent import Agent
+from agno.models.ollama import Ollama
+from agno.models.google import Gemini
+from agno.models.anthropic import Claude
+from agno.models.groq import Groq
 
 script_dir = os.path.dirname(os.path.abspath(__file__))
 sys.path.append(script_dir)
@@ -111,7 +109,6 @@ def _show_diff(path: str):
     console.print(Panel(colored, title=f"[{THEME['success']}]Δ diff › {path}[/]",
                         border_style="#5fff87", padding=(0, 1)))
 
-@tool
 def shell(command: str) -> str:
     """Run a shell command and return stdout + stderr. Use for creating folders, running scripts, installing packages, executing Python, etc."""
     if not check_permission("shell"):
@@ -137,7 +134,6 @@ def shell(command: str) -> str:
     ))
     return output
 
-@tool
 def read_file(path: str) -> str:
     """Read the contents of a file at the given path."""
     if not check_permission("file_read"):
@@ -162,7 +158,6 @@ def read_file(path: str) -> str:
     except Exception as e:
         return f"ERROR reading file: {e}"
 
-@tool
 def write_file(path: str, content: str) -> str:
     """Write content to a file, creating it and any parent directories if needed."""
     if not check_permission("file_write"):
@@ -185,7 +180,6 @@ def write_file(path: str, content: str) -> str:
     ))
     return result
 
-@tool
 def list_files(path: str = ".") -> str:
     """List files and directories at the given path."""
     if not check_permission("file_read"):
@@ -212,7 +206,6 @@ def list_files(path: str = ".") -> str:
     ))
     return result
 
-@tool
 def web_search(query: str) -> str:
     """Search the web for information. Returns a summary of results."""
     if not check_permission("web"):
@@ -223,10 +216,10 @@ def web_search(query: str) -> str:
         border_style="#d7af5f", padding=(0, 1)
     ))
     try:
-        from langchain_community.tools import DuckDuckGoSearchRun
-        search = DuckDuckGoSearchRun()
-        result = search.run(query)
-        result = result[:2000] + ("…(truncated)" if len(result) > 2000 else "")
+        from duckduckgo_search import DDGS
+        results = DDGS().text(query, max_results=3)
+        result = str(results)[:2000]
+        result = result + ("…(truncated)" if len(str(results)) > 2000 else "")
         console.print(Panel(
             Text(result[:400] + ("…" if len(result) > 400 else ""), style=THEME["tool_res"]),
             title=f"[{THEME['tool_res']}]✔  SEARCH RESULTS[/]",
@@ -267,24 +260,28 @@ class ContextMemory:
             "4. If a tool fails, report the error honestly. Do not invent results.",
             "5. When writing code to generate visualizations, actually execute it with the shell tool.",
             "6. Save all output files to the current working directory or a subfolder.",
+            "7. ALWAYS use `write_file` to write Python scripts to disk, THEN run them with `shell`. NEVER use bash heredocs (e.g. `python3 - <<EOF`) as they cause syntax escapes.",
+            "8. ONLY invoke tools via the native structured function calling API. NEVER output raw `<function=...>` or `<tool>` tags in your text response, as it causes API crashes.",
+            "9. STRIVE FOR EXTRAORDINARY QUALITY. If a user request is open-ended or vague, proactively expand the scope to deliver a comprehensive, premium-tier result. Do not do the bare minimum.",
+            "10. BE RELENTLESS. If a tool fails or data is missing, immediately pivot to alternative methods. Do not skip steps, simulate success, or quit early.",
         ]
+        
+        if self.messages:
+            parts.append("\n=== RECENT CHAT HISTORY ===")
+            for m in list(self.messages)[-15:]:
+                parts.append(f"{m['role'].upper()}: {m['content']}")
+            parts.append("===========================\n")
+            
         if self.task_log:
             parts.append("\nCompleted tasks:")
             parts.extend(f"  ✓ {t}" for t in self.task_log[-5:])
+            
         if self.file_changes:
             recent = list(dict.fromkeys(self.file_changes))[-8:]
             parts.append("\nFiles touched:")
             parts.extend(f"  • {f}" for f in recent)
+            
         return "\n".join(parts)
-
-    def to_lc_messages(self) -> list:
-        result = []
-        for m in self.messages:
-            if m["role"] == "user":
-                result.append(HumanMessage(content=m["content"]))
-            elif m["role"] == "assistant":
-                result.append(AIMessage(content=m["content"]))
-        return result
 
     def save(self, path: Path):
         data = {
@@ -331,42 +328,81 @@ def ensure_ollama_model(model_id: str) -> bool:
     console.print(f"[{THEME['error']}]✘[/]  Failed to pull '{model_id}'.")
     return False
 
+def load_env():
+    env_file = Path(".env")
+    if env_file.exists():
+        for line in env_file.read_text(errors="ignore").splitlines():
+            line = line.strip()
+            if line and not line.startswith("#") and "=" in line:
+                key, _, val = line.partition("=")
+                os.environ[key.strip()] = val.strip()
+
+def save_env(key: str, val: str):
+    env_file = Path(".env")
+    lines = env_file.read_text(errors="ignore").splitlines() if env_file.exists() else []
+    updated = False
+    for i, line in enumerate(lines):
+        if line.startswith(f"{key}="):
+            lines[i] = f"{key}={val}"
+            updated = True
+            break
+    if not updated:
+        lines.append(f"{key}={val}")
+    env_file.write_text("\n".join(lines))
+
 def ensure_api_keys(model_id: str):
     mid = model_id.lower()
-    if "gemini" in mid and not os.environ.get("GOOGLE_API_KEY"):
-        os.environ["GOOGLE_API_KEY"] = Prompt.ask(
-            f"[{THEME['warning']}]GOOGLE_API_KEY[/]", password=True, console=console)
-    if "claude" in mid and not os.environ.get("ANTHROPIC_API_KEY"):
-        os.environ["ANTHROPIC_API_KEY"] = Prompt.ask(
-            f"[{THEME['warning']}]ANTHROPIC_API_KEY[/]", password=True, console=console)
-    if any(x in mid for x in ["llama", "mixtral", "gemma", "deepseek", "groq/", "qwen/qwen3-32b"]) or mid.startswith("groq/"):
+    
+    def _prompt_and_save(key_name: str, msg: str):
+        if not os.environ.get(key_name):
+            val = Prompt.ask(msg, password=True, console=console).strip()
+            if val:
+                os.environ[key_name] = val
+                save_env(key_name, val)
+
+    if "gemini" in mid:
+        _prompt_and_save("GOOGLE_API_KEY", f"[{THEME['warning']}]GOOGLE_API_KEY[/]")
+    if "claude" in mid:
+        _prompt_and_save("ANTHROPIC_API_KEY", f"[{THEME['warning']}]ANTHROPIC_API_KEY[/]")
+    if mid.startswith("openai/"):
+        _prompt_and_save("OPENAI_API_KEY", f"[{THEME['warning']}]OPENAI_API_KEY[/]")
+    if mid.startswith("groq/"):
         if not os.environ.get("GROQ_API_KEY"):
-            console.print(f"  [{THEME['dim']}]Free key at https://console.groq.com[/]")
-            os.environ["GROQ_API_KEY"] = Prompt.ask(
-                f"[{THEME['warning']}]GROQ_API_KEY[/]", password=True, console=console)
+            console.print(f"  [{THEME['dim']}]Get your API key at https://console.groq.com[/]")
+            _prompt_and_save("GROQ_API_KEY", f"[{THEME['warning']}]GROQ_API_KEY[/]")
 
 def build_llm(model_id: str):
-    mid = model_id.lower().replace("groq/", "")
+    if model_id.startswith("groq/"):
+        return Groq(id=model_id[5:])
+    if model_id.startswith("openai/"):
+        from agno.models.openai import OpenAIChat
+        return OpenAIChat(id=model_id[7:])
+    if model_id.startswith("ollama/"):
+        id_str = model_id[7:]
+        ensure_ollama_model(id_str)
+        return Ollama(id=id_str)
+    
+    mid = model_id.lower()
     if "gemini" in mid:
-        return ChatGoogleGenerativeAI(model=model_id, temperature=0)
+        return Gemini(id=model_id)
     elif "claude" in mid:
-        return ChatAnthropic(model=model_id, temperature=0)
-    elif any(x in mid for x in ["llama", "mixtral", "gemma", "deepseek", "qwen2-", "qwen/qwen3-"]):
-        return ChatGroq(model=mid, temperature=0)
+        return Claude(id=model_id)
     else:
-        ensure_ollama_model(model_id)
-        return ChatOllama(model=model_id, temperature=0)
+        return Ollama(id=model_id)
 
 def decompose_task(llm, task: str) -> list[str]:
     console.print(f"\n[{THEME['dim']}]Decomposing task into steps…[/]\n")
     prompt = (
-        f'Break this task into ordered atomic steps: "{task}"\n\n'
+        f'Break this task into highly detailed, exhaustive ordered atomic steps: "{task}"\n\n'
+        'You MUST proactively expand vague requests to include rigorous research, robust error-handling, edge-case coverage, and professional quality assurance.\n'
+        'Assume the user wants a premium, production-level outcome and DO NOT take shortcuts.\n'
         'Reply ONLY with a JSON array of strings like: ["step 1", "step 2"]\n'
         'No explanation, no markdown, just the JSON array.'
     )
     try:
-        resp = llm.invoke([HumanMessage(content=prompt)])
-        text = resp.content.strip()
+        agent = Agent(model=llm, markdown=False)
+        resp = agent.run(prompt)
+        text = resp.content.strip() if hasattr(resp, 'content') and resp.content else ""
         if "```" in text:
             text = text.split("```")[1]
             if text.startswith("json"):
@@ -378,7 +414,15 @@ def decompose_task(llm, task: str) -> list[str]:
         pass
     return [task]
 
-def run_step(agent, mem: ContextMemory, step: str, step_num: int, total: int) -> str:
+def build_agent(llm, mem: ContextMemory) -> Agent:
+    return Agent(
+        model=llm,
+        tools=TOOLS,
+        description=mem.build_system_prompt(),
+        markdown=True
+    )
+
+def run_step(agent: Agent, mem: ContextMemory, step: str, step_num: int, total: int) -> str:
     console.print()
     console.print(Rule(f"[{THEME['primary']}]Step {step_num}/{total}[/]", style=THEME["secondary"]))
     console.print(Panel(
@@ -387,24 +431,15 @@ def run_step(agent, mem: ContextMemory, step: str, step_num: int, total: int) ->
         border_style=THEME["secondary"], padding=(0, 2)
     ))
 
-    history = mem.to_lc_messages()
-    messages = history + [HumanMessage(content=step)]
-
     start = time.time()
     content = ""
-    tool_calls_made = []
 
     try:
-        result = agent.invoke({"messages": messages})
-        all_messages = result.get("messages", [])
-
-        for msg in all_messages:
-            if hasattr(msg, "tool_calls") and msg.tool_calls:
-                for tc in msg.tool_calls:
-                    tool_calls_made.append(tc.get("name", "unknown"))
-            if isinstance(msg, AIMessage) and msg.content:
-                content = msg.content if isinstance(msg.content, str) else str(msg.content)
-
+        response = agent.run(step)
+        if hasattr(response, 'content') and response.content:
+            content = str(response.content)
+        else:
+            content = str(response)
     except Exception as exc:
         content = f"[ERROR] {exc}"
         console.print(f"[{THEME['error']}]{content}[/]")
@@ -420,19 +455,16 @@ def run_step(agent, mem: ContextMemory, step: str, step_num: int, total: int) ->
         ))
         mem.add("assistant", content)
 
-    if tool_calls_made:
-        console.print(f"[{THEME['dim']}]Tools used: {', '.join(tool_calls_made)}[/]")
-
     return content
 
 def print_header():
     header = Text()
     header.append("  ╔══════════════════════════════════════╗\n", style=THEME["secondary"])
-    header.append("  ║  ", style=THEME["secondary"])
-    header.append("AUTONOMOUS RESEARCH AGENT", style=THEME["primary"])
-    header.append("  ║\n", style=THEME["secondary"])
-    header.append("  ║  ", style=THEME["secondary"])
-    header.append("Deep Research Studio  ·  v1.0          ", style=THEME["muted"])
+    header.append("  ║", style=THEME["secondary"])
+    header.append("  AUTONOMOUS RESEARCH AGENT           ", style=THEME["primary"])
+    header.append("║\n", style=THEME["secondary"])
+    header.append("  ║", style=THEME["secondary"])
+    header.append("  Deep Research Studio  ·  v2.0       ", style=THEME["muted"])
     header.append("║\n", style=THEME["secondary"])
     header.append("  ╚══════════════════════════════════════╝\n", style=THEME["secondary"])
     console.print(header)
@@ -451,10 +483,119 @@ def print_help():
     table.add_row("/deny <tool>",   "Disable a permission")
     console.print(Panel(table, title="[dim]Commands[/dim]", border_style=THEME["muted"]))
 
-def select_model(default: str = "llama-3.3-70b-versatile") -> str:
-    console.print(f"\n[{THEME['dim']}]Groq (free): llama-3.3-70b-versatile · mixtral-8x7b-32768  |  "
-                  f"API: gemini-2.0-flash · claude-haiku-4-5-20251001  |  Local: qwen2.5:7b-instruct[/]")
-    return Prompt.ask(f"[{THEME['user']}]Model[/]", default=default, console=console)
+def get_ollama_models() -> list[str]:
+    result = subprocess.run(["ollama", "list"], capture_output=True, text=True)
+    if result.returncode != 0:
+        return []
+    models = []
+    for line in result.stdout.splitlines():
+        if line.strip() and not line.startswith("NAME"):
+            models.append(line.split()[0])
+    return models
+
+def select_model() -> str:
+    while True:
+        console.print()
+        choice = Prompt.ask(f"[{THEME['user']}]Provider (api / ollama)[/]", choices=["api", "ollama"], default="api", console=console)
+        
+        if choice == "api":
+            provider = Prompt.ask(
+                f"[{THEME['user']}]Select API Provider[/]", 
+                choices=["groq", "google", "anthropic", "openai"], 
+                default="groq", console=console
+            )
+            
+            if provider == "groq":
+                ensure_api_keys("groq/dummy")
+                api_key = os.environ.get("GROQ_API_KEY")
+                
+                console.print(f"[{THEME['dim']}]Fetching live Groq models...[/]")
+                try:
+                    import requests
+                    url = "https://api.groq.com/openai/v1/models"
+                    headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
+                    resp = requests.get(url, headers=headers, timeout=5)
+                    if resp.status_code == 401:
+                        console.print(f"[{THEME['error']}]✘ Authentication failed. API key is unauthorized.[/]")
+                        os.environ.pop("GROQ_API_KEY", None)
+                        continue
+                    resp.raise_for_status()
+                    
+                    data = resp.json()
+                    available = sorted([m["id"] for m in data.get("data", []) if "whisper" not in m["id"].lower()])
+                    
+                    if available:
+                        table = Table(box=box.SIMPLE, show_header=False, padding=(0, 2))
+                        table.add_column(style=THEME["dim"])
+                        table.add_column(style=THEME["dim"])
+                        table.add_column(style=THEME["dim"])
+                        for i in range(0, len(available), 3):
+                            chunk = available[i:i+3]
+                            while len(chunk) < 3:
+                                chunk.append("")
+                            table.add_row(*chunk)
+                        console.print(Panel(table, title="[dim]Available API Models[/dim]", border_style=THEME["muted"]))
+                except Exception as e:
+                    console.print(f"[{THEME['warning']}]Could not fetch live Groq models ({e})[/]")
+                    console.print(f"[{THEME['dim']}]Examples: llama-3.3-70b-versatile, mixtral-8x7b-32768, qwen-2.5-32b[/]")
+                    
+                base_id = Prompt.ask(f"[{THEME['user']}]Enter Groq Model[/]", default="llama-3.3-70b-versatile", console=console)
+                model_id = "groq/" + base_id
+                
+            elif provider == "google":
+                console.print(f"[{THEME['dim']}]Examples: gemini-2.5-flash, gemini-2.0-pro[/]")
+                base_id = Prompt.ask(f"[{THEME['user']}]Enter Gemini Model[/]", default="gemini-2.5-flash", console=console)
+                model_id = base_id
+                
+            elif provider == "anthropic":
+                console.print(f"[{THEME['dim']}]Examples: claude-3-7-sonnet-latest, claude-3-5-sonnet-latest[/]")
+                base_id = Prompt.ask(f"[{THEME['user']}]Enter Claude Model[/]", default="claude-3-7-sonnet-latest", console=console)
+                model_id = base_id
+                
+            elif provider == "openai":
+                console.print(f"[{THEME['dim']}]Examples: gpt-4o, o3-mini[/]")
+                base_id = Prompt.ask(f"[{THEME['user']}]Enter OpenAI Model[/]", default="gpt-4o", console=console)
+                model_id = "openai/" + base_id
+        else:
+            models = get_ollama_models()
+            if not models:
+                console.print(f"[{THEME['error']}]✘ No local Ollama models found.[/]")
+                continue
+            console.print(f"[{THEME['dim']}]Locally available: {', '.join(models)}[/]")
+            base_id = Prompt.ask(f"[{THEME['user']}]Enter Ollama Model[/]", default=models[0] if models else "llama3.2", console=console)
+            model_id = "ollama/" + base_id
+            
+        console.print(f"[{THEME['dim']}]Testing tool-call capabilities for '{base_id}'...[/]")
+        
+        while True:
+            try:
+                ensure_api_keys(model_id)
+                llm = build_llm(model_id)
+                test_agent = Agent(model=llm, tools=[list_files])
+                resp = test_agent.run("List files in the current directory.")
+                
+                if not getattr(resp, "content", None):
+                    raise ValueError("Empty response received. This model likely does not natively support tool calling.")
+                
+                console.print(f"[{THEME['success']}]✔ Model '{base_id}' authenticated and supports tool-calling.[/]")
+                return model_id
+            except Exception as e:
+                error_str = str(e).lower()
+                is_auth_error = any(key in error_str for key in ["401", "unauthorized", "authentication", "api_key", "invalid api"])
+                
+                if is_auth_error:
+                    console.print(f"[{THEME['error']}]✘ API Key Invalid or Expired: {e}[/]")
+                    if "groq" in model_id.lower(): os.environ.pop("GROQ_API_KEY", None)
+                    if "gemini" in model_id.lower(): os.environ.pop("GOOGLE_API_KEY", None)
+                    if "claude" in model_id.lower(): os.environ.pop("ANTHROPIC_API_KEY", None)
+                    if "openai" in model_id.lower(): os.environ.pop("OPENAI_API_KEY", None)
+                    
+                    retry = Confirm.ask(f"[{THEME['dim']}]Try entering a new key for API provider?[/]", default=True, console=console)
+                    if not retry:
+                        break # Goes back to selecting a new model provider
+                else:
+                    console.print(f"[{THEME['error']}]✘ Model '{base_id}' rejected tool-calls or lacked capabilities: {e}[/]\n[{THEME['warning']}]Please select a different model.[/]")
+                    break
 
 SESSIONS_DIR = Path(".agent_sessions")
 
@@ -477,8 +618,73 @@ def load_last_session() -> Optional[ContextMemory]:
     except Exception:
         return None
 
+def select_project():
+    PROJECTS_DIR = Path.home() / ".deepresearch" / "projects"
+    PROJECTS_DIR.mkdir(parents=True, exist_ok=True)
+    
+    while True:
+        projects = [d for d in PROJECTS_DIR.iterdir() if d.is_dir()]
+        projects.sort(key=lambda x: x.stat().st_mtime, reverse=True)
+        
+        console.print(f"\n[{THEME['primary']}]Registered Projects:[/]")
+        if not projects:
+            console.print(f"  [{THEME['dim']}]No projects found.[/]")
+        else:
+            for i, p in enumerate(projects, 1):
+                console.print(f"  [{THEME['tool']}]{i}.[/] {p.name}")
+        
+        console.print(f"\n[{THEME['dim']}]Enter a number to select, or type 'new <name>' to create a project.[/]")
+        choice = Prompt.ask(f"[{THEME['user']}]Project[/]", console=console).strip()
+        
+        if choice.lower().startswith("new "):
+            name = choice[4:].strip()
+            if name:
+                new_proj = PROJECTS_DIR / name
+                new_proj.mkdir(parents=True, exist_ok=True)
+                os.chdir(new_proj)
+                console.print(f"[{THEME['success']}]✔ Created and switched to project: {name}[/]\n")
+                return
+        elif choice.isdigit():
+            idx = int(choice) - 1
+            if 0 <= idx < len(projects):
+                os.chdir(projects[idx])
+                console.print(f"[{THEME['success']}]✔ Switched to project: {projects[idx].name}[/]\n")
+                return
+        
+        console.print(f"[{THEME['warning']}]Invalid choice. Try again.[/]")
+
+def edit_plan(steps: list[str]) -> list[str]:
+    if not steps: return steps
+    
+    while True:
+        console.print(f"\n[{THEME['primary']}]Current Implementation Plan ({len(steps)} steps):[/]")
+        for i, s in enumerate(steps, 1):
+            console.print(f"  [{THEME['tool']}]{i}.[/] {s}")
+            
+        console.print(f"\n[{THEME['dim']}]Commands: 'start' to proceed | 'add <text>' | 'edit <num> <text>' | 'del <num>'[/]")
+        cmd_input = Prompt.ask(f"[{THEME['user']}]Plan Action[/]", default="start", show_default=False, console=console).strip()
+        parts = cmd_input.split(" ", 2)
+        cmd = parts[0].lower()
+        
+        if cmd == "start" or not cmd:
+            return steps
+        elif cmd == "add" and len(parts) >= 2:
+            steps.append(cmd_input[4:].strip())
+        elif cmd == "del" and len(parts) >= 2 and parts[1].isdigit():
+            idx = int(parts[1]) - 1
+            if 0 <= idx < len(steps):
+                steps.pop(idx)
+        elif cmd == "edit" and len(parts) >= 3 and parts[1].isdigit():
+            idx = int(parts[1]) - 1
+            if 0 <= idx < len(steps):
+                steps[idx] = parts[2].strip()
+        else:
+            console.print(f"[{THEME['warning']}]Invalid command.[/]")
+
 def main():
+    load_env()
     print_header()
+    select_project()
 
     mem: ContextMemory
     if SESSIONS_DIR.exists() and any(SESSIONS_DIR.glob("*.json")):
@@ -490,12 +696,10 @@ def main():
     console.print(f"[{THEME['dim']}]Session: {mem.session_id}[/]\n")
 
     model_id = select_model()
-    ensure_api_keys(model_id)
-
     llm = build_llm(model_id)
-    agent = create_react_agent(llm, TOOLS, prompt=mem.build_system_prompt())
+    agent = build_agent(llm, mem)
 
-    console.print(f"\n[{THEME['success']}]✔[/] Agent ready  [{THEME['dim']}]model={model_id}  framework=LangChain[/]")
+    console.print(f"\n[{THEME['success']}]✔[/] Agent ready  [{THEME['dim']}]model={model_id}  framework=Agno[/]")
     print_help()
 
     while True:
@@ -521,7 +725,7 @@ def main():
 
         if task.lower() == "/clear":
             mem = ContextMemory()
-            agent = create_react_agent(llm, TOOLS, prompt=mem.build_system_prompt())
+            agent = build_agent(llm, mem)
             console.print(f"[{THEME['warning']}]Context cleared.[/]")
             continue
 
@@ -530,10 +734,9 @@ def main():
             continue
 
         if task.lower() == "/model":
-            model_id = select_model(default=model_id)
-            ensure_api_keys(model_id)
+            model_id = select_model()
             llm = build_llm(model_id)
-            agent = create_react_agent(llm, TOOLS, prompt=mem.build_system_prompt())
+            agent = build_agent(llm, mem)
             console.print(f"[{THEME['success']}]✔[/] Switched to [{THEME['primary']}]{model_id}[/]")
             continue
 
@@ -558,26 +761,31 @@ def main():
             continue
 
         steps = decompose_task(llm, task)
+        steps = edit_plan(steps)
 
-        if len(steps) > 1:
-            console.print(f"\n[{THEME['primary']}]Task decomposed into {len(steps)} steps:[/]")
-            for i, s in enumerate(steps, 1):
-                console.print(f"  [{THEME['muted']}]{i}.[/] {s}")
-            console.print()
-
-        for i, step in enumerate(steps, 1):
-            if i > 1:
-                proceed = Confirm.ask(
-                    f"\n[{THEME['warning']}]▶ Proceed with step {i}/{len(steps)}?[/]  [{THEME['dim']}]{step[:80]}[/]",
-                    default=True, console=console
-                )
-                if not proceed:
-                    console.print(f"[{THEME['warning']}]⏸  Stopped at step {i}.[/]")
-                    break
-
+        initial_len = len(steps)
+        completed = 0
+        
+        while steps:
+            step = steps.pop(0)
+            completed += 1
+            
             mem.add("user", step)
-            run_step(agent, mem, step, i, len(steps))
+            agent = build_agent(llm, mem)
+            run_step(agent, mem, step, completed, completed + len(steps))
             mem.record_task(step)
+            
+            if steps:
+                proceed = Prompt.ask(
+                    f"\n[{THEME['warning']}]▶ Next up:[/] {steps[0][:80]}...\n[{THEME['dim']}]Press Enter to proceed, type 'edit' to change remaining plan, or 'stop' to cancel[/]",
+                    default="", show_default=False, console=console
+                ).strip().lower()
+                
+                if proceed == "stop":
+                    console.print(f"[{THEME['warning']}]⏸  Execution stopped.[/]")
+                    break
+                elif proceed == "edit":
+                    steps = edit_plan(steps)
 
         save_session(mem)
 

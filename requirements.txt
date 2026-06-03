@@ -1,11 +1,9 @@
 agno
+duckduckgo-search
 rich
-langchain-core
-langchain-groq
-langchain-google-genai
-langchain-anthropic
-langchain-ollama
-langgraph
 requests
 psutil
 locvec
+pymupdf
+sentence-transformers
+faiss-cpu
