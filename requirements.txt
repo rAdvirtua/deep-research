@@ -8,3 +8,7 @@ pymupdf
 sentence-transformers
 faiss-cpu
 ollama
+openai
+google-genai
+anthropic
+groq
