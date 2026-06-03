@@ -1,4 +1,4 @@
-# Deep Research Studio (Agno Engine)
+# Deep Research Studio
 
 An extraordinarily capable, terminal-based autonomous AI research and engineering agent. Built dynamically on top of the powerful **Agno Framework**, it can scan code, read local files, execute custom terminal setups, surf the web via DuckDuckGo, and write advanced multi-file Python architecture across isolated project workspaces.
 
