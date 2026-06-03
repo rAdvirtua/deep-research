@@ -261,7 +261,7 @@ class ContextMemory:
             "5. When writing code to generate visualizations, actually execute it with the shell tool.",
             "6. Save all output files to the current working directory or a subfolder.",
             "7. ALWAYS use `write_file` to write Python scripts to disk, THEN run them with `shell`. NEVER use bash heredocs (e.g. `python3 - <<EOF`) as they cause syntax escapes.",
-            "8. ONLY invoke tools via the native structured function calling API. NEVER output raw `<function=...>` or `<tool>` tags in your text response, as it causes API crashes.",
+            "8. ONLY invoke tools via the native structured function calling API. Rely EXCLUSIVELY on the backend JSON schema. Do not write raw XML tags in your plaintext response.",
             "9. STRIVE FOR EXTRAORDINARY QUALITY. If a user request is open-ended or vague, proactively expand the scope to deliver a comprehensive, premium-tier result. Do not do the bare minimum.",
             "10. BE RELENTLESS. If a tool fails or data is missing, immediately pivot to alternative methods. Do not skip steps, simulate success, or quit early.",
         ]
@@ -431,22 +431,40 @@ def run_step(agent: Agent, mem: ContextMemory, step: str, step_num: int, total: 
         border_style=THEME["secondary"], padding=(0, 2)
     ))
 
-    start = time.time()
+    max_retries = 3
     content = ""
+    start = time.time()
+    current_step_prompt = step
 
-    try:
-        response = agent.run(step)
-        if hasattr(response, 'content') and response.content:
-            content = str(response.content)
-        else:
-            content = str(response)
-    except Exception as exc:
-        content = f"[ERROR] {exc}"
-        console.print(f"[{THEME['error']}]{content}[/]")
+    for attempt in range(max_retries):
+        try:
+            response = agent.run(current_step_prompt)
+            if hasattr(response, 'content') and response.content:
+                content = str(response.content)
+            else:
+                content = str(response)
+            
+            break # Success, break out of retry loop
+            
+        except Exception as exc:
+            err_msg = str(exc)
+            
+            if attempt < max_retries - 1:
+                console.print(f"[{THEME['warning']}]⚠ API Exception caught (Attempt {attempt+1}/{max_retries}). LLM self-correcting syntax...[/]")
+                console.print(f"[{THEME['dim']}]Error details: {err_msg}[/]")
+                # Feed the failure traceback back into the LLM context so it can fix itself
+                current_step_prompt = (
+                    f"SYSTEM ALERT: Your previous tool execution crashed the API with this validation error:\n{err_msg}\n\n"
+                    "You failed to use proper native JSON tooling schemas. Please correct your formatting syntax immediately and retry executing the tools to fulfill the user's task."
+                )
+                time.sleep(2)
+            else:
+                content = f"[ERROR] {err_msg}"
+                console.print(f"[{THEME['error']}]✘ Final attempt failed: {content}[/]")
 
     elapsed = time.time() - start
 
-    if content:
+    if content and not content.startswith("[ERROR]"):
         console.print()
         console.print(Panel(
             Text(content),
